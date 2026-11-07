@@ -1,4 +1,4 @@
-# Real README
+# README
 
 The learning has been done with the help of famous Andrej Karpathey video: let's make GPT from scratch.
 
