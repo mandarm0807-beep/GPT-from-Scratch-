@@ -1,0 +1,16 @@
+# Virtual Environment
+.venv_gpu/
+.venv/
+venv/
+ENV/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyCharm / IDE
+.idea/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/

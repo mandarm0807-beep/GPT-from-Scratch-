@@ -1,0 +1,276 @@
+code of Kalman filter
+import numpy as np
+
+class KalmanFilter: # this class helps us avoid the loop, it's applicable for many iterations
+    def __init__(self, dt, process_noise, measurement_noise_angle, measurement_noise_ang_velocity, initial_angle=0.0, initial_rate=0.0 ):
+        # we will have to take (dt value), (Q i.e. process noise), (R measurement noise i.e. variance)
+
+        # state transition matrix (F)
+        self.A = np.array([[1, dt],
+                      [0, 1]], dtype=float)  # its F matrix (state transition matrix) with order 2 cross 2
+
+        # process noise
+        self.Q = np.array([[process_noise, 0],
+                      [0, process_noise]], dtype=float)  # small process noise, is Q of k
+
+        # measurement noise (angle AND angular velocity)
+        self.R = np.array([[measurement_noise_angle, 0],
+                      [0, measurement_noise_ang_velocity]], dtype=float)  # how noisy is the (angle, and angular velocity) reading of the rocket
+
+        # observation matrix — measuring angle and angular velocity directly
+        self.H = np.array([[1, 0],
+                        [0, 1]], dtype=float)  # observation (measurement) matrix
+
+        self.I = np.identity(2, dtype=float)  # identity, needed for P_k update
+
+        # V IMP --initial state--
+        self.P = np.array([[1, 0],
+                    [0, 1]], dtype=float)  # initial coverance (un-certainty) --> is P
+
+        self.x_estimate = np.array([[initial_angle], [initial_rate]], dtype=float)
+        # initialization step, taking the initial angle(starting will be 0) and angular velocity(starting will be 0)
+
+
+    def update(self, measurement_angle, measurement_angular_velocity):
+        Z = np.array([[measurement_angle],
+                      [measurement_angular_velocity]], dtype=float)
+
+        # --predict step--
+        self.x_estimate = self.A @ self.x_estimate
+        P_pred = self.A @ self.P @ self.A.T + self.Q
+
+        # --update step--
+        K = P_pred @ self.H.T @ (np.linalg.inv((self.H @ P_pred @ self.H.T + self.R)))
+        y = Z - (self.H @ self.x_estimate)
+        self.x_estimate = self.x_estimate + (K @ y)
+        self.P = (self.I - (K @ self.H)) @ P_pred
+
+        return self.x_estimate.ravel()
+
+code of PID controller
+class PIDController:
+    def __init__(self, dt, Kp, Ki, Kd, output_limit):
+        self.dt = dt
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.output_limit = output_limit
+
+        self.integral_sum = 0.0  # integral sum for both the pitch, yaw will be same
+        #self.prev_error = 0.0  # V IMP
+        #self.first_step = True
+
+    def compute(self, target, current_value, current_rate):
+        error = target - current_value  # error calculation applies for both pitch, yaw angle
+
+        prop_term = self.Kp * error  # proportional term
+        self.integral_sum += error * self.dt
+        self.integral_sum = max(-10.0, min(10.0, self.integral_sum))  # <-- ADDED: anti-windup clamp
+        integral_term = self.Ki * self.integral_sum   # integral term
+
+        """
+                if self.first_step:
+            derivative = 0.0
+            self.first_step = False
+        else:
+            derivative = self.Kd * ((error - self.prev_error) / self.dt)   # derivative term"""
+
+        # Derivative Term using clean rate directly from Kalman Filter!
+        # Negative sign because rate opposes angle increase
+        derivative_term = -self.Kd * current_rate
+
+        #self.prev_error = error  # V IMP: when next new error will be calculated, this prev error will be taken as previous for the new one
+
+        raw_output = prop_term + integral_term + derivative_term   # its raw value, need to be applied to servo which has +-15 degree rotations
+
+        servo_output = max(-self.output_limit, min(self.output_limit, raw_output))
+
+        return servo_output
+
+code of launch : connecting the kalman and the Kalman filter
+import random
+import numpy as np
+from matplotlib import pyplot as plt
+from kalmanfilter2d import KalmanFilter
+from pid2d import PIDController
+
+dt = 0.01
+
+# V IMP  the true physics
+true_pitch = 5.0  # initial pitch tilt angle (deg) --> rocket is tilted with little angle, for launch
+true_yaw = -5.2   # initial yaw tilt angle (deg) --> rocket is tilted and hence, yaw angle is also little deviated
+
+angular_velocity_pitch = 0.0  # it's the rotating motion of the rocket, due to pitch angle --> later correction for gimbal angle
+angular_velocity_yaw = 0.0  # due to yaw angle --> later correction for gimbal angle
+
+moment_of_inertia = 50.0
+gimbal_to_torque = 10.0 # change from 2.0 to 10.0 so that the physical gimbal works more effectively
+
+# servo has a limit like ( 3 deg movement per 10 msec step )
+max_servo_speed_per_step = 3.0
+
+# V IMP
+actual_servo_pitch = 0.0
+actual_servo_yaw = 0.0
+
+kf_pitch = KalmanFilter(dt=dt, process_noise=0.01,
+                        measurement_noise_angle=4, measurement_noise_ang_velocity=0.04,
+                        initial_angle=true_pitch, initial_rate=angular_velocity_pitch)
+kf_yaw = KalmanFilter(dt=dt, process_noise=0.01,
+                      measurement_noise_angle=4, measurement_noise_ang_velocity=0.04,
+                      initial_angle=true_yaw, initial_rate=angular_velocity_yaw)
+
+# Adjusted PID Gains (Kp=2.0, Ki=0.01, Kd=0.8)
+#pid_pitch = PIDController(dt=dt, Kp=2.0, Ki=0.01, Kd=0.8, output_limit=15.0)  # Kp is changed from 1.2 to 2.0 for correctness
+#pid_yaw = PIDController(dt=dt, Kp=2.0, Ki=0.01, Kd=0.8, output_limit=15.0)
+
+
+#pid_pitch = PIDController(dt=dt, Kp=2.5, Ki=0.01, Kd=1.2, output_limit=15.0)
+#pid_yaw   = PIDController(dt=dt, Kp=2.5, Ki=0.01, Kd=1.2, output_limit=15.0)
+
+# Updated PID Gains for rapid, critically-damped stabilization:
+pid_pitch = PIDController(dt=dt, Kp=4.5, Ki=0.01, Kd=3.0, output_limit=15.0)
+pid_yaw   = PIDController(dt=dt, Kp=4.5, Ki=0.01, Kd=3.0, output_limit=15.0)
+
+
+# --- history, for plotting ---
+true_pitch_history, true_yaw_history = [], []  # it's real values given by the rocket when in the air
+noisy_pitch_history, noisy_yaw_history = [], []  # the sensor, will not always give the correct reading, hence, we  are adding it
+clean_pitch_history, clean_yaw_history = [], []  # the kalman will filter the error, and will pass to pid to actually act on the servo
+cmd_servo_pitch_history, cmd_servo_yaw_history = [], []  # PID controller gives this, i.e. what angle is needed
+servo_pitch_history, servo_yaw_history = [], []  # actual gimbal angle that produces torque
+
+
+for k in range(1000):
+    # ACHIVE 1: first we added the error, assuming that the rocket gets tilted in the air,
+    #          and then add a correction value to get it back to zero angle(adjustment)
+    # the noisy reading is due to, say wind is making it
+
+    #true_pitch += random.gauss(0, 0.3) - (true_pitch * 0.01) # small pull back toward 0, mimicking real aerodynamic stability
+    #true_yaw += random.gauss(0, 0.3) - (true_yaw * 0.01)
+
+    # 1. Aerodynamic wind torque gust
+    # i.e. instead of directly introducing the random value,
+    #     the wind moves the rocket, causing torque generation, and by torque and inertia we get angular accn
+    wind_torque_pitch = random.gauss(0, 0.05)
+    wind_torque_yaw = random.gauss(0, 0.05)
+
+
+    # 2: V IMP
+    # sensor reading: the sensor not always gives the right readings, hence we are adding it by self
+    noisy_pitch_angle = true_pitch + random.gauss(0, 2)
+    noisy_pitch_rate = angular_velocity_pitch + random.gauss(0, 0.2) # it's by pitch
+    # here, noisy_pitch_rate = angular velocity by pitch
+
+    # V IMP
+    noisy_yaw_angle = true_yaw + random.gauss(0, 2)
+    noisy_yaw_rate = angular_velocity_yaw + random.gauss(0, 0.2) # it's by yaw
+    # here, noisy_yaw_rate = angular velocity by yaw
+
+    # 3: kalman filter --> we need the actual measurement( noisy_angle, noisy_angular_velocity) --> to clean it
+    clean_pitch, clean_pitch_rate = kf_pitch.update(noisy_pitch_angle, noisy_pitch_rate)
+    clean_yaw, clean_yaw_rate = kf_yaw.update(noisy_yaw_angle, noisy_yaw_rate )
+    # clean_pitch_rate, clean_yaw_rate = clean_angular_velocity for pitch and clean_angular_velocity for yaw
+
+    # 4: V IMP: it's the real angle correct version, need for the servo in the gimbal
+    # changes: V IMP: we have pass real clean rate to compute in pid controller, so that derivative term get true value and not an estimate or assume value
+    cmd_servo_pitch = pid_pitch.compute(target=0, current_value=clean_pitch, current_rate=clean_pitch_rate)
+    cmd_servo_yaw = pid_yaw.compute(target=0, current_value=clean_yaw, current_rate=clean_yaw_rate)
+    #cmd = is calculated by the PID, i.e. what is needed
+
+    # 5. servo (Actuator) Dynamics: Servo speed rate-limiting
+    delta_p = cmd_servo_pitch - actual_servo_pitch
+    actual_servo_pitch += np.clip(delta_p, -max_servo_speed_per_step, max_servo_speed_per_step)
+    # actual_servo_pitch = at present the gimbal is in what position (IMP at present), because, it's like past things, the current state of the gimbal aftr we calculated the needed state angle
+    # V IMP meaning: actual = like current state
+
+    delta_y = cmd_servo_yaw - actual_servo_yaw
+    actual_servo_yaw += np.clip(delta_y, -max_servo_speed_per_step, max_servo_speed_per_step)
+
+    # changes: V IMP: 6. Real Rotational Physics Integration:
+    # Torque (total) = Gimbal Torque + Wind Torque
+    torque_pitch = (actual_servo_pitch * gimbal_to_torque) + wind_torque_pitch   # torque_pitch = final torque by pitch (which is correct and needed)
+    angular_velocity_pitch += (torque_pitch / moment_of_inertia) * dt
+    true_pitch += angular_velocity_pitch * dt
+
+    torque_yaw = (actual_servo_yaw * gimbal_to_torque) + wind_torque_yaw  # torque_yaw = final torque by yaw (which is correct and needed)
+    angular_velocity_yaw += (torque_yaw / moment_of_inertia) * dt
+    true_yaw += angular_velocity_yaw * dt
+
+
+    """ACHIVE: little physics used
+    # 6. physics: torque comes from the *achieved* gimbal angle, not the PID wish
+    torque_pitch = servo_pitch * gimbal_to_torque
+    angular_velocity_pitch += (torque_pitch / moment_of_inertia) * dt   #angular_acc = torque_pitch / moment_of_inertia
+    true_pitch += angular_velocity_pitch * dt
+
+    torque_yaw = servo_yaw * gimbal_to_torque
+    angular_velocity_yaw += (torque_yaw / moment_of_inertia) * dt
+    true_yaw += angular_velocity_yaw * dt"""
+
+
+    # --- store for plotting ---
+    true_pitch_history.append(true_pitch)
+    noisy_pitch_history.append(noisy_pitch_angle)
+    clean_pitch_history.append(clean_pitch)
+    cmd_servo_pitch_history.append(cmd_servo_pitch)
+    servo_pitch_history.append(actual_servo_pitch)
+
+    true_yaw_history.append(true_yaw)
+    noisy_yaw_history.append(noisy_yaw_angle)
+    clean_yaw_history.append(clean_yaw)
+    cmd_servo_yaw_history.append(cmd_servo_yaw)
+    servo_yaw_history.append(actual_servo_yaw)
+
+    print(f"step {k}: true pitch={true_pitch:.3f}  noisy(pitch)={noisy_pitch_angle:.3f}  "
+         f"clean filter angle(pitch)={clean_pitch:.3f}  servo gimbal(pitch)={actual_servo_pitch:.3f}")
+
+    print(f"step {k}: true yaw={true_yaw:.3f}  noisy(yaw)={noisy_yaw_angle:.3f}  "
+          f"clean filter angle(yaw)={clean_yaw:.3f}  servo gimbal(yaw0)={actual_servo_yaw:.3f}")
+
+
+# --- plotting: 2 axes x 2 rows (angle tracking + servo command) ---
+k_axis = range(1000)
+
+fig, axs = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+
+# Pitch Angle
+axs[0, 0].plot(k_axis, true_pitch_history, color="black", linewidth=2, label="True pitch")
+axs[0, 0].scatter(k_axis, noisy_pitch_history, color="orange", alpha=0.2, s=8, label="Noisy reading")
+axs[0, 0].plot(k_axis, clean_pitch_history, color="blue", linewidth=1.5, label="Kalman estimate")
+axs[0, 0].axhline(y=0, color="red", linestyle="--", label="Target (0°)")
+axs[0, 0].set_ylabel("Pitch (degrees)")
+axs[0, 0].set_title("Pitch Tracking")
+axs[0, 0].legend()
+axs[0, 0].grid(True)
+# Yaw Angle
+axs[0, 1].plot(k_axis, true_yaw_history, color="black", linewidth=2, label="True yaw")
+axs[0, 1].scatter(k_axis, noisy_yaw_history, color="orange", alpha=0.2, s=8, label="Noisy reading")
+axs[0, 1].plot(k_axis, clean_yaw_history, color="blue", linewidth=1.5, label="Kalman estimate")
+axs[0, 1].axhline(y=0, color="red", linestyle="--", label="Target (0°)")
+axs[0, 1].set_ylabel("Yaw (degrees)")
+axs[0, 1].set_title("Yaw Tracking")
+axs[0, 1].legend()
+axs[0, 1].grid(True)
+# Pitch Servo Angle
+axs[1, 0].plot(k_axis, servo_pitch_history, color="green", linewidth=1.5, label="Pitch servo gimbal angle")
+axs[1, 0].set_ylabel("Servo angle (deg)")
+axs[1, 0].set_xlabel("Time step (k)")
+axs[1, 0].legend()
+axs[1, 0].grid(True)
+# Yaw Servo Angle
+axs[1, 1].plot(k_axis, servo_yaw_history, color="purple", linewidth=1.5, label="Yaw servo gimbal angle")
+axs[1, 1].set_xlabel("Time step (k)")
+axs[1, 1].legend()
+axs[1, 1].grid(True)
+plt.tight_layout()
+plt.show()
+
+library used :
+pytest
+numpy
+random
+matplotlib
+kalmanfilter2d
+pid2d
+scipy
